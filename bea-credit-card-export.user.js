@@ -1,9 +1,20 @@
 // ==UserScript==
 // @name         BEA Credit Card Statement Exporter
-// @namespace    https://github.com/jack/bea-credit-card-exporter
-// @version      6.0.0
-// @description  Collect all BEA credit-card statement pages and export a CSV with Excel summary formulas.
+// @name:zh-CN   东亚银行信用卡账单导出
+// @name:zh-HK   東亞銀行信用卡賬單匯出
+// @name:zh-TW   東亞銀行信用卡賬單匯出
+// @namespace    https://github.com/jackdhch/BEAHK
+// @version      9.0.0
+// @description  Unofficial. Collect every page of a BEA (Bank of East Asia) credit-card transaction enquiry and export a clean CSV. Runs locally; sends nothing anywhere.
+// @description:zh-CN  非官方。一键收集东亚银行网银信用卡交易记录的所有分页，导出干净的 CSV，并显示消费合计。只在本地运行，不上传任何数据。
+// @description:zh-HK  非官方。一次過收集東亞銀行網上銀行信用卡交易紀錄嘅所有分頁，匯出乾淨嘅 CSV 同顯示消費總數。只喺本機運行，唔會上載任何資料。
+// @description:zh-TW  非官方。一次收集東亞銀行網上銀行信用卡交易紀錄的所有分頁，匯出乾淨的 CSV 並顯示消費合計。只在本機執行，不會上傳任何資料。
 // @author       Jack
+// @license      MIT
+// @homepageURL  https://github.com/jackdhch/BEAHK
+// @supportURL   https://github.com/jackdhch/BEAHK/issues
+// @downloadURL  https://github.com/jackdhch/BEAHK/raw/main/bea-credit-card-export.user.js
+// @updateURL    https://github.com/jackdhch/BEAHK/raw/main/bea-credit-card-export.user.js
 // @match        https://online.hkbea.com/*
 // @grant        none
 // @run-at       document-idle
@@ -12,6 +23,126 @@
 (function () {
     'use strict';
 
+    // ---------- pure parsing (no DOM; covered by test.js) ----------
+
+    function normalizeText(value) {
+        return (value || '').replace(/\s+/g, ' ').trim();
+    }
+
+    // Accepts DD/MM/YYYY, YYYY年M月D日, YYYY-MM-DD. Returns YYYY-MM-DD or null.
+    // ISO output so Excel never swaps day and month.
+    function parseDateText(value) {
+        const text = normalizeText(value);
+        let m = text.match(/^(\d{2})\/(\d{2})\/(\d{4})$/);
+        if (m) return `${m[3]}-${m[2]}-${m[1]}`;
+        m = text.match(/^(\d{4})年(\d{1,2})月(\d{1,2})日$/);
+        if (m) return `${m[1]}-${m[2].padStart(2, '0')}-${m[3].padStart(2, '0')}`;
+        m = text.match(/^(\d{4})-(\d{2})-(\d{2})$/);
+        if (m) return m[0];
+        return null;
+    }
+
+    function parseAmount(value) {
+        let raw = normalizeText(value).replace(/,/g, '');
+        if (!raw) return NaN;
+
+        let negative = false;
+        if (raw.endsWith('-')) {
+            negative = true;
+            raw = raw.slice(0, -1);
+        }
+        raw = raw.replace(/^\+/, '');
+
+        const num = Number.parseFloat(raw);
+        if (!Number.isFinite(num)) return NaN;
+        return negative ? -num : num;
+    }
+
+    const AMOUNT_PATTERN = /^[+-]?[\d,]+(?:\.\d{1,2})?-?$/;
+
+    // texts: the text of each cell in one table row.
+    // First date = posting date, second date (if any) = transaction date,
+    // last amount-looking cell = amount, everything else = description.
+    function parseRow(texts) {
+        const dateIdx = [];
+        texts.forEach((t, i) => { if (parseDateText(t)) dateIdx.push(i); });
+        if (dateIdx.length === 0) return null;
+
+        let amountIndex = -1;
+        for (let i = texts.length - 1; i > dateIdx[0]; i--) {
+            if (dateIdx.includes(i)) continue;
+            const text = normalizeText(texts[i]);
+            if (text && AMOUNT_PATTERN.test(text) && Number.isFinite(parseAmount(text))) {
+                amountIndex = i;
+                break;
+            }
+        }
+        if (amountIndex === -1) return null;
+
+        const used = new Set([dateIdx[0], dateIdx[1], amountIndex]);
+        return {
+            bookDate: parseDateText(texts[dateIdx[0]]),
+            txnDate: dateIdx.length > 1 ? parseDateText(texts[dateIdx[1]]) : '',
+            desc: texts.filter((_, i) => !used.has(i)).map(normalizeText).filter(Boolean).join(' '),
+            amount: parseAmount(texts[amountIndex]),
+        };
+    }
+
+    const isPayment = (desc) => /\bPAYMENT\b/i.test(desc);
+
+    // BEA has shown both conventions: spending positive with "123.00-" credits
+    // (May 2026 layout) and spending negative (later layout). Output is always
+    // spending positive, credits negative, plus a type column.
+    // ponytail: majority vote — breaks only if credits outnumber purchases in
+    // the collected range; switch to a manual toggle if that ever happens.
+    function normalizeSigns(txns) {
+        const negatives = txns.filter((t) => t.amount < 0).length;
+        const spendSign = negatives > txns.length / 2 ? -1 : 1;
+        return txns.map((t) => {
+            const amount = spendSign * t.amount || 0;
+            const type = amount >= 0 ? 'expense' : isPayment(t.desc) ? 'payment' : 'refund';
+            return { ...t, amount, type };
+        });
+    }
+
+    // Sum in cents to avoid float drift.
+    function summarize(rows) {
+        const cents = { expense: 0, refund: 0, payment: 0 };
+        rows.forEach((t) => { cents[t.type] += Math.round(Math.abs(t.amount) * 100); });
+        return {
+            expense: cents.expense / 100,
+            refund: cents.refund / 100,
+            net: (cents.expense - cents.refund) / 100,
+            payment: cents.payment / 100,
+        };
+    }
+
+    // Stop spreadsheet apps from executing a description as a formula.
+    function safeCell(text) {
+        return /^[=+\-@\t\r]/.test(text) ? `'${text}` : text;
+    }
+
+    function toCSVLine(values) {
+        return values.map((value) => {
+            const text = String(value ?? '');
+            return /[",\n\r]/.test(text) ? `"${text.replace(/"/g, '""')}"` : text;
+        }).join(',');
+    }
+
+    function buildCSV(rows) {
+        return [
+            ['Posting Date', 'Transaction Date', 'Description', 'Amount', 'Type'],
+            ...rows.map((t) => [t.bookDate, t.txnDate, safeCell(t.desc), t.amount.toFixed(2), t.type]),
+        ].map(toCSVLine).join('\n');
+    }
+
+    if (typeof window === 'undefined') {
+        module.exports = { parseDateText, parseAmount, parseRow, normalizeSigns, summarize, safeCell, toCSVLine, buildCSV };
+        return;
+    }
+
+    // ---------- browser ----------
+
     if (window !== window.top) return;
 
     const STATE = {
@@ -19,15 +150,12 @@
         pageKeysSeen: new Set(),
         running: false,
         delayMs: 3000,
+        latestMonthOnly: true,
         lastMessage: 'Waiting...',
-        dateInitialized: false,
     };
 
-    window._beaCollected = STATE.collected;
-    window._beaPagesSeen = STATE.pageKeysSeen;
-
     function getFrameDocument() {
-        const iframe = document.querySelector('iframe');
+        const iframe = document.querySelector('iframe.bea_ifame') || document.querySelector('iframe');
         if (!iframe) return document;
 
         try {
@@ -43,54 +171,34 @@
         return doc.defaultView || window;
     }
 
-    function normalizeText(value) {
-        return (value || '').replace(/\s+/g, ' ').trim();
-    }
-
-    function parseAmount(value) {
-        const raw = normalizeText(value).replace(/,/g, '');
-        if (!raw) return NaN;
-
-        if (raw.endsWith('-')) {
-            return -Number.parseFloat(raw.slice(0, -1));
-        }
-
-        return Number.parseFloat(raw);
-    }
-
     function getTransactionRows() {
         const doc = getFrameDocument();
         const rows = [];
 
         doc.querySelectorAll('table tr').forEach((row) => {
             if (row.offsetParent === null && row.offsetHeight === 0) return;
+            // A layout row wrapping a nested table would otherwise swallow all
+            // inner rows into one bogus transaction.
+            if (row.querySelector('table')) return;
 
-            const cells = Array.from(row.querySelectorAll('td'));
-            if (cells.length !== 4) return;
+            const cells = Array.from(row.cells);
+            if (cells.length < 2) return;
 
-            const bookDate = normalizeText(cells[0].textContent);
-            const txnDate = normalizeText(cells[1].textContent);
-            const desc = normalizeText(cells[2].textContent);
-            const amount = parseAmount(cells[3].textContent);
-
-            if (!/^\d{2}\/\d{2}\/\d{4}$/.test(bookDate)) return;
-            if (!Number.isFinite(amount)) return;
-
-            rows.push({ bookDate, txnDate, desc, amount });
+            const txn = parseRow(cells.map((cell) => cell.textContent));
+            if (txn) rows.push(txn);
         });
 
         return rows;
     }
 
     function getPageSignature() {
-        const rows = getTransactionRows();
-        if (rows.length === 0) return '';
-
-        return rows
+        return getTransactionRows()
             .map((row) => [row.bookDate, row.txnDate, row.desc, row.amount].join('|'))
             .join('\n');
     }
 
+    // Dedupe by page content, not page number: in manual mode the user may
+    // click back to a page already collected.
     function collectCurrentPage(pageIndex) {
         const rows = getTransactionRows();
         if (rows.length === 0) {
@@ -99,19 +207,7 @@
             return false;
         }
 
-        const pageKey = [
-            pageIndex,
-            rows.length,
-            rows[0].bookDate,
-            rows[0].txnDate,
-            rows[0].desc,
-            rows[0].amount,
-            rows[rows.length - 1].bookDate,
-            rows[rows.length - 1].txnDate,
-            rows[rows.length - 1].desc,
-            rows[rows.length - 1].amount,
-        ].join('|');
-
+        const pageKey = getPageSignature();
         if (STATE.pageKeysSeen.has(pageKey)) {
             STATE.lastMessage = `Page ${pageIndex + 1}: already collected`;
             updateUI();
@@ -120,13 +216,45 @@
 
         STATE.pageKeysSeen.add(pageKey);
         STATE.collected.push(...rows);
-        window._beaCollected = STATE.collected;
-        window._beaPagesSeen = STATE.pageKeysSeen;
         STATE.lastMessage = `Collected page ${pageIndex + 1}: ${rows.length} rows`;
         updateUI();
         return true;
     }
 
+    // ---------- pagination ----------
+
+    function isVisible(el) {
+        return !!(el.offsetParent || el.offsetHeight || el.getClientRects().length);
+    }
+
+    function isDisabled(el) {
+        if (el.disabled || el.getAttribute('aria-disabled') === 'true') return true;
+        let node = el;
+        for (let i = 0; i < 3 && node; i++, node = node.parentElement) {
+            const cls = String(node.className || '').toLowerCase();
+            if (/\bdisabled\b/.test(cls)) return true;
+        }
+        return false;
+    }
+
+    // Dispatch a full pointer/mouse event sequence so frameworks that ignore
+    // bare .click() (or listen to mousedown/touch) still react.
+    function realClick(el) {
+        const win = el.ownerDocument.defaultView || window;
+        const opts = { bubbles: true, cancelable: true, view: win };
+        ['pointerdown', 'mousedown', 'pointerup', 'mouseup', 'click'].forEach((type) => {
+            try {
+                const Ctor = type.startsWith('pointer') && win.PointerEvent
+                    ? win.PointerEvent
+                    : win.MouseEvent;
+                el.dispatchEvent(new Ctor(type, opts));
+            } catch (error) {
+                console.warn('[BEA] realClick failed for', type, error);
+            }
+        });
+    }
+
+    // Legacy: elements calling changePage(n) via onclick / href.
     function findChangePageTarget(pageIndex) {
         const doc = getFrameDocument();
         const quoted = String(pageIndex).replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
@@ -140,22 +268,117 @@
         }) || null;
     }
 
+    // New layout: a numbered button inside the pagination bar.
+    // pageNumber is 1-based (what is printed on the button).
+    function findPageNumberButton(pageNumber) {
+        const doc = getFrameDocument();
+        const wanted = String(pageNumber);
+        const all = Array.from(doc.querySelectorAll('a, button, li, span, div'));
+
+        const matches = all.filter((el) => {
+            if (!isVisible(el) || isDisabled(el)) return false;
+            if (normalizeText(el.textContent) !== wanted) return false;
+            const nums = el.textContent.match(/\d+/g) || [];
+            return nums.length === 1;
+        });
+        if (matches.length === 0) return null;
+
+        const scored = matches.map((el) => {
+            let score = 0;
+            let node = el;
+            for (let i = 0; i < 5 && node; i++, node = node.parentElement) {
+                const ident = `${node.className || ''} ${node.id || ''}`.toLowerCase();
+                if (/pag|page-item|page-link/.test(ident)) score += 2;
+            }
+            if (['A', 'BUTTON', 'LI'].includes(el.tagName)) score += 1;
+            if (el.tagName === 'DIV') score -= 1;
+            return { el, score };
+        });
+        scored.sort((a, b) => b.score - a.score);
+        return scored[0].el;
+    }
+
+    // Fallback: the "next" arrow (>, ›, », 下一页 ...).
+    function findNextArrow() {
+        const doc = getFrameDocument();
+        const all = Array.from(doc.querySelectorAll('a, button, li, span'));
+
+        return all.find((el) => {
+            if (!isVisible(el) || isDisabled(el)) return false;
+            const text = normalizeText(el.textContent);
+            const label = `${el.getAttribute('aria-label') || ''} ${el.getAttribute('title') || ''} ${el.className || ''}`.toLowerCase();
+            if (/next|下一页|下页/.test(label) && !/prev|上一页/.test(label)) return true;
+            return ['>', '›', '»', '→', '下一页'].includes(text);
+        }) || null;
+    }
+
+    // Inspect the pagination bar: highest visible page number and the
+    // currently active one. Used to detect the last page.
+    function getPaginationState() {
+        const doc = getFrameDocument();
+        const all = Array.from(doc.querySelectorAll('a, button, li, span'));
+        const nums = [];
+        let active = null;
+
+        all.forEach((el) => {
+            if (!isVisible(el)) return;
+            const text = normalizeText(el.textContent);
+            if (!/^\d{1,3}$/.test(text)) return;
+
+            const ownCls = String(el.className || '').toLowerCase();
+            const parentCls = String((el.parentElement && el.parentElement.className) || '').toLowerCase();
+            if (!/pag|page/.test(ownCls + ' ' + parentCls)) return;
+
+            const n = Number.parseInt(text, 10);
+            nums.push(n);
+            if (/active|current|selected/.test(ownCls) || /active|current|selected/.test(parentCls)) {
+                active = n;
+            }
+        });
+
+        if (nums.length === 0) return null;
+        return { max: Math.max(...nums), active };
+    }
+
     function goToPage(pageIndex) {
         const frameWindow = getFrameWindow();
 
+        // 1. legacy JS hook
         if (typeof frameWindow.changePage === 'function') {
+            console.log('[BEA] goToPage via changePage()', pageIndex);
             frameWindow.changePage(String(pageIndex));
             return true;
         }
 
-        const target = findChangePageTarget(pageIndex);
-        if (target) {
-            target.click();
+        // 2. legacy onclick / href target
+        const legacy = findChangePageTarget(pageIndex);
+        if (legacy) {
+            console.log('[BEA] goToPage via legacy target', legacy.outerHTML.slice(0, 200));
+            realClick(legacy);
             return true;
         }
 
+        // 3. new pagination bar: click the numbered button (1-based label)
+        const numBtn = findPageNumberButton(pageIndex + 1);
+        if (numBtn) {
+            console.log('[BEA] goToPage via number button', numBtn.outerHTML.slice(0, 200));
+            realClick(numBtn);
+            return true;
+        }
+
+        // 4. fallback: next-page arrow
+        const arrow = findNextArrow();
+        if (arrow) {
+            console.log('[BEA] goToPage via next arrow', arrow.outerHTML.slice(0, 200));
+            realClick(arrow);
+            return true;
+        }
+
+        console.log('[BEA] goToPage: no control found for page', pageIndex + 1);
         return false;
     }
+
+    // ---------- loop ----------
 
     function sleep(ms) {
         return new Promise((resolve) => setTimeout(resolve, ms));
@@ -177,6 +400,7 @@
         let changedSignature = '';
 
         while (Date.now() - startedAt < timeoutMs) {
+            if (!STATE.running) return false;
             await sleep(300);
             const currentSignature = getPageSignature();
 
@@ -196,10 +420,14 @@
     function resetCollection() {
         STATE.collected = [];
         STATE.pageKeysSeen = new Set();
-        window._beaCollected = STATE.collected;
-        window._beaPagesSeen = STATE.pageKeysSeen;
         STATE.lastMessage = 'Collection reset';
         updateUI();
+    }
+
+    function finishLoop(message) {
+        STATE.running = false;
+        STATE.lastMessage = message;
+        updateUI(true);
     }
 
     async function autoLoop() {
@@ -220,22 +448,42 @@
             collectCurrentPage(pageIndex);
 
             const nextPageIndex = pageIndex + 1;
-            STATE.lastMessage = `Opening page ${nextPageIndex + 1}...`;
-            updateUI();
 
-            if (!goToPage(nextPageIndex)) {
-                STATE.running = false;
-                STATE.lastMessage = 'Finished: no next page control found';
-                updateUI(true);
+            // Last-page check: current page is the highest number in the bar.
+            const pag = getPaginationState();
+            if (pag && pag.active !== null && pag.active >= pag.max) {
+                finishLoop('Finished: reached the last page');
                 break;
             }
 
-            const changed = await waitForPageChange(previousSignature, Math.max(STATE.delayMs * 2, 6000));
-            if (!changed) {
-                STATE.running = false;
-                STATE.lastMessage = 'Finished: page did not change after next-page request';
-                updateUI(true);
-                break;
+            STATE.lastMessage = `Opening page ${nextPageIndex + 1}...`;
+            updateUI();
+
+            const clicked = goToPage(nextPageIndex);
+            let changed = false;
+
+            if (clicked) {
+                changed = await waitForPageChange(
+                    previousSignature,
+                    Math.max(STATE.delayMs * 3, 12000)
+                );
+            }
+
+            if (!STATE.running) break;
+
+            if (!clicked || !changed) {
+                // Semi-auto fallback: let the user click the page number by
+                // hand while we watch for the table to change.
+                STATE.lastMessage = `Auto-click failed — please click page ${nextPageIndex + 1} MANUALLY. Watching for the change (or press Stop to finish)...`;
+                updateUI();
+                console.log('[BEA] Waiting for manual page change. clicked =', clicked);
+
+                changed = await waitForPageChange(previousSignature, 300000);
+
+                if (!changed) {
+                    if (STATE.running) finishLoop('Finished: no further page change detected');
+                    break;
+                }
             }
 
             pageIndex = nextPageIndex;
@@ -249,54 +497,69 @@
         updateUI();
     }
 
+    // ---------- export ----------
+
+    // Signs are detected on everything collected, then optionally narrowed to
+    // the latest calendar month (the enquiry can return rows across a month
+    // boundary).
+    function selectRows() {
+        const all = normalizeSigns(STATE.collected);
+        if (all.length === 0) return { rows: all, label: '', skipped: 0 };
+
+        const dates = all.map((t) => t.bookDate).sort();
+        if (!STATE.latestMonthOnly) {
+            return { rows: all, label: `${dates[0]}_to_${dates[dates.length - 1]}`, skipped: 0 };
+        }
+
+        const latest = dates[dates.length - 1].slice(0, 7);
+        const rows = all.filter((t) => t.bookDate.startsWith(latest));
+        return { rows, label: latest, skipped: all.length - rows.length };
+    }
+
     function exportCSV() {
-        const all = STATE.collected;
-        if (!all || all.length === 0) {
+        const { rows, label, skipped } = selectRows();
+        if (rows.length === 0) {
             alert('No data collected yet.');
             return;
         }
 
-        const dataStart = 8;
-        const dataEnd = dataStart + all.length - 1;
-        const amountRange = `D${dataStart}:D${dataEnd}`;
-        const descRange = `C${dataStart}:C${dataEnd}`;
-
-        const formulaExpense = `=SUMPRODUCT((${amountRange}>0)*(ISERROR(SEARCH("PAYMENT FPS",${descRange})))*${amountRange})`;
-        const formulaRefund = `=SUMPRODUCT((${amountRange}<0)*(ISERROR(SEARCH("PAYMENT FPS",${descRange})))*${amountRange})*-1`;
-        const formulaNet = '=B2-B3';
-        const formulaRepayment = `=SUMPRODUCT((ISNUMBER(SEARCH("PAYMENT FPS",${descRange})))*(${amountRange}<0)*${amountRange})*-1`;
-
-        const rows = [
-            ['Item', 'Amount (auto-calculated)', '', ''],
-            ['Expense total', formulaExpense, '', ''],
-            ['Refund total', formulaRefund, '', ''],
-            ['Net expense', formulaNet, '', ''],
-            ['PAYMENT FPS repayment (excluded)', formulaRepayment, '', ''],
-            ['', '', '', ''],
-            ['Posting Date', 'Transaction Date', 'Description', 'Amount'],
-            ...all.map((txn) => [txn.bookDate, txn.txnDate, txn.desc, txn.amount]),
-        ];
-
-        const csv = rows.map(toCSVLine).join('\n');
-        const blob = new Blob(['\uFEFF' + csv], { type: 'text/csv;charset=utf-8' });
+        const blob = new Blob(['﻿' + buildCSV(rows)], { type: 'text/csv;charset=utf-8' });
         const url = URL.createObjectURL(blob);
         const link = document.createElement('a');
 
         link.href = url;
-        link.download = `BEA_statement_${new Date().toISOString().slice(0, 10)}.csv`;
+        link.download = `BEA_statement_${label}.csv`;
         link.click();
         URL.revokeObjectURL(url);
+
+        STATE.lastMessage = skipped > 0
+            ? `Exported ${rows.length} rows for ${label} (skipped ${skipped} rows from other months)`
+            : `Exported ${rows.length} rows for ${label}`;
+        updateUI(true);
     }
 
-    function toCSVLine(values) {
-        return values.map((value) => {
-            const text = String(value === undefined || value === null ? '' : value);
-            if (text.includes(',') || text.includes('"') || text.includes('\n') || text.startsWith('=')) {
-                return `"${text.replace(/"/g, '""')}"`;
-            }
-            return text;
-        }).join(',');
+    // Legacy enquiry form: set the start date to day 01 and re-run the query.
+    function setStartToFirst() {
+        const doc = getFrameDocument();
+        const startInput = doc.getElementById('STARTDATE');
+        const showBtn = doc.getElementById('showBtn');
+        const parts = startInput ? normalizeText(startInput.value).split('/') : [];
+        if (!showBtn || parts.length !== 3) {
+            STATE.lastMessage = 'Date form not found on this page';
+            updateUI();
+            return;
+        }
+
+        const EventCtor = (doc.defaultView && doc.defaultView.Event) || Event;
+        startInput.value = `01/${parts[1]}/${parts[2]}`;
+        startInput.dispatchEvent(new EventCtor('input', { bubbles: true }));
+        startInput.dispatchEvent(new EventCtor('change', { bubbles: true }));
+        showBtn.click();
+        STATE.lastMessage = `Start date set to ${startInput.value}`;
+        updateUI();
     }
+
+    // ---------- UI ----------
 
     function setButtonState(button, enabled, activeColor, disabledColor) {
         button.disabled = !enabled;
@@ -307,11 +570,12 @@
 
     function updateUI(done) {
         const status = document.getElementById('_beaStatus');
+        const summary = document.getElementById('_beaSummary');
         const startBtn = document.getElementById('_beaStartBtn');
         const stopBtn = document.getElementById('_beaStopBtn');
         const exportBtn = document.getElementById('_beaExportBtn');
         const resetBtn = document.getElementById('_beaResetBtn');
-        if (!status || !startBtn || !stopBtn || !exportBtn || !resetBtn) return;
+        if (!status || !summary || !startBtn || !stopBtn || !exportBtn || !resetBtn) return;
 
         const rows = STATE.collected.length;
         const pages = STATE.pageKeysSeen.size;
@@ -322,6 +586,15 @@
             : running
                 ? `<span style="color:#f39c12">${escapeHTML(STATE.lastMessage)} (${pages} pages / ${rows} rows)</span>`
                 : `${escapeHTML(STATE.lastMessage)}<br><b style="color:white">${rows}</b> rows from ${pages} pages`;
+
+        const sel = selectRows();
+        const s = summarize(sel.rows);
+        const fmt = (n) => n.toLocaleString('en-HK', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+        summary.innerHTML = sel.rows.length === 0 ? '' : `
+            <div style="color:#aaa;margin-bottom:2px;">${escapeHTML(sel.label)}</div>
+            Expense <b>${fmt(s.expense)}</b> − Refund <b>${fmt(s.refund)}</b>
+            = Net <b style="color:#2ecc71">${fmt(s.net)}</b><br>
+            <span style="color:#aaa">Payments (excluded): ${fmt(s.payment)}</span>`;
 
         setButtonState(startBtn, !running, '#c0392b', '#555');
         setButtonState(stopBtn, running, '#888', '#555');
@@ -361,16 +634,20 @@
 
         panel.innerHTML = `
             <div style="font-weight:bold;font-size:13px;margin-bottom:8px;color:#e74c3c;">
-                BEA statement exporter v6
+                BEA statement exporter v9
             </div>
             <div id="_beaStatus" style="margin-bottom:8px;color:#aaa;min-height:32px;">
                 Waiting...
             </div>
-            <label style="display:block;margin-bottom:10px;font-size:11px;">
+            <div id="_beaSummary" style="margin-bottom:8px;line-height:1.5;"></div>
+            <label style="display:block;margin-bottom:6px;font-size:11px;">
                 Page delay:
                 <input id="_beaDelayInput" type="number" value="3" min="2" max="20"
                     style="width:42px;background:#333;color:white;border:1px solid #555;border-radius:3px;padding:2px 4px;">
                 seconds
+            </label>
+            <label style="display:block;margin-bottom:10px;font-size:11px;">
+                <input id="_beaMonthInput" type="checkbox" checked> Latest month only
             </label>
             <div style="display:flex;gap:6px;flex-wrap:wrap;">
                 <button id="_beaStartBtn" style="border:none;border-radius:5px;padding:7px 10px;font-size:12px;font-weight:bold;">
@@ -385,72 +662,31 @@
                 <button id="_beaResetBtn" style="border:none;border-radius:5px;padding:7px 10px;font-size:12px;">
                     Reset
                 </button>
+                <button id="_beaFirstBtn" title="Set start date to the 1st of the month and search again"
+                    style="border:none;border-radius:5px;padding:7px 10px;font-size:12px;background:#34495e;color:white;cursor:pointer;">
+                    From 1st
+                </button>
             </div>
         `;
 
         document.body.appendChild(panel);
 
-        document.getElementById('_beaStartBtn').addEventListener('click', () => {
+        const readDelay = () => {
             STATE.delayMs = Math.max(2, Number.parseInt(document.getElementById('_beaDelayInput').value, 10) || 3) * 1000;
-            autoLoop();
-        });
-
+        };
+        document.getElementById('_beaStartBtn').addEventListener('click', () => { readDelay(); autoLoop(); });
         document.getElementById('_beaStopBtn').addEventListener('click', stopAuto);
         document.getElementById('_beaExportBtn').addEventListener('click', exportCSV);
         document.getElementById('_beaResetBtn').addEventListener('click', resetCollection);
-        document.getElementById('_beaDelayInput').addEventListener('change', (event) => {
-            STATE.delayMs = Math.max(2, Number.parseInt(event.target.value, 10) || 3) * 1000;
+        document.getElementById('_beaFirstBtn').addEventListener('click', setStartToFirst);
+        document.getElementById('_beaDelayInput').addEventListener('change', readDelay);
+        document.getElementById('_beaMonthInput').addEventListener('change', (event) => {
+            STATE.latestMonthOnly = event.target.checked;
+            updateUI();
         });
 
         updateUI();
-    }
-
-    function autoInitDateOnce() {
-        if (STATE.dateInitialized) return false;
-
-        const doc = getFrameDocument();
-        const startInput = doc.getElementById('STARTDATE');
-        const showBtn = doc.getElementById('showBtn');
-        if (!startInput || !showBtn) return false;
-
-        const parts = normalizeText(startInput.value).split('/');
-        if (parts.length !== 3) return false;
-
-        const newValue = `01/${parts[1]}/${parts[2]}`;
-        if (startInput.value !== newValue) {
-            const EventCtor = (doc.defaultView && doc.defaultView.Event) || Event;
-            startInput.value = newValue;
-            startInput.dispatchEvent(new EventCtor('input', { bubbles: true }));
-            startInput.dispatchEvent(new EventCtor('change', { bubbles: true }));
-        }
-
-        STATE.dateInitialized = true;
-        showBtn.click();
-        STATE.lastMessage = `Start date set to ${newValue}`;
-        updateUI();
-        console.log('[BEA] Auto-init completed once:', newValue);
-        return true;
-    }
-
-    function waitAndInit() {
-        const iframe = document.querySelector('iframe');
-        if (!iframe) {
-            setTimeout(waitAndInit, 500);
-            return;
-        }
-
-        const tryInit = () => {
-            if (STATE.dateInitialized) return;
-            if (!autoInitDateOnce()) setTimeout(tryInit, 500);
-        };
-
-        iframe.addEventListener('load', () => {
-            if (!STATE.dateInitialized) setTimeout(tryInit, 800);
-        });
-
-        setTimeout(tryInit, 800);
     }
 
     setTimeout(injectUI, 1500);
-    waitAndInit();
 }());
