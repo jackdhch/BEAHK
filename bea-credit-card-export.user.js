@@ -4,7 +4,7 @@
 // @name:zh-HK   東亞銀行信用卡賬單匯出
 // @name:zh-TW   東亞銀行信用卡賬單匯出
 // @namespace    https://github.com/jackdhch/BEAHK
-// @version      9.0.0
+// @version      9.1.0
 // @description  Unofficial. Collect every page of a BEA (Bank of East Asia) credit-card transaction enquiry and export a clean CSV. Runs locally; sends nothing anywhere.
 // @description:zh-CN  非官方。一键收集东亚银行网银信用卡交易记录的所有分页，导出干净的 CSV，并显示消费合计。只在本地运行，不上传任何数据。
 // @description:zh-HK  非官方。一次過收集東亞銀行網上銀行信用卡交易紀錄嘅所有分頁，匯出乾淨嘅 CSV 同顯示消費總數。只喺本機運行，唔會上載任何資料。
@@ -136,8 +136,124 @@
         ].map(toCSVLine).join('\n');
     }
 
+
+    // ---------- panel text ----------
+
+    const TEXT = {
+        en: {
+            title: 'BEA statement exporter v9',
+            waiting: 'Waiting...',
+            noRows: 'Page {n}: no transaction rows found',
+            already: 'Page {n}: already collected',
+            collected: 'Collected page {n}: {rows} rows',
+            reset: 'Collection reset',
+            starting: 'Starting collection...',
+            lastPage: 'Finished: reached the last page',
+            opening: 'Opening page {n}...',
+            manual: 'Auto-click failed. Please click page {n} yourself; watching for the change (or press Stop to finish)...',
+            noChange: 'Finished: no further page change detected',
+            stopped: 'Stopped',
+            noData: 'No data collected yet.',
+            exported: 'Exported {rows} rows for {label}',
+            exportedSkipped: 'Exported {rows} rows for {label} (skipped {skipped} rows from other months)',
+            noForm: 'Date form not found on this page',
+            startSet: 'Start date set to {date}',
+            progress: '{pages} pages / {rows} rows',
+            expense: 'Expense',
+            refund: 'Refund',
+            net: 'Net',
+            payment: 'Payments (excluded): ',
+            delay: 'Page delay: ',
+            seconds: 'seconds',
+            latestMonth: 'Latest month only',
+            start: 'Auto collect',
+            stop: 'Stop',
+            csv: 'CSV',
+            clear: 'Reset',
+            first: 'From 1st',
+            firstTip: 'Set start date to the 1st of the month and search again',
+        },
+        zhHans: {
+            title: '东亚信用卡账单导出 v9',
+            waiting: '等待中…',
+            noRows: '第 {n} 页：没找到交易记录',
+            already: '第 {n} 页：已经收集过',
+            collected: '已收集第 {n} 页：{rows} 条',
+            reset: '已清空',
+            starting: '开始收集…',
+            lastPage: '完成：已到最后一页',
+            opening: '正在打开第 {n} 页…',
+            manual: '自动翻页失败，请手动点第 {n} 页。脚本正在等页面变化（点「停止」可结束）…',
+            noChange: '完成：没有等到新的一页',
+            stopped: '已停止',
+            noData: '还没有收集到数据。',
+            exported: '已导出 {label}，共 {rows} 条',
+            exportedSkipped: '已导出 {label}，共 {rows} 条（跳过其他月份 {skipped} 条）',
+            noForm: '这个页面上找不到日期栏',
+            startSet: '开始日期已改为 {date}',
+            progress: '{pages} 页 / {rows} 条',
+            expense: '消费',
+            refund: '退款',
+            net: '净消费',
+            payment: '还款（不计入）：',
+            delay: '每页间隔：',
+            seconds: '秒',
+            latestMonth: '只要最近一个月',
+            start: '自动收集',
+            stop: '停止',
+            csv: '导出 CSV',
+            clear: '清空',
+            first: '从 1 号查',
+            firstTip: '把开始日期改成本月 1 号并重新查询',
+        },
+        zhHant: {
+            title: '東亞信用卡賬單匯出 v9',
+            waiting: '等待中…',
+            noRows: '第 {n} 頁：找不到交易紀錄',
+            already: '第 {n} 頁：已經收集過',
+            collected: '已收集第 {n} 頁：{rows} 筆',
+            reset: '已清空',
+            starting: '開始收集…',
+            lastPage: '完成：已到最後一頁',
+            opening: '正在開啟第 {n} 頁…',
+            manual: '自動翻頁失敗，請手動按第 {n} 頁。腳本正在等待頁面變化（按「停止」可結束）…',
+            noChange: '完成：沒有等到新的一頁',
+            stopped: '已停止',
+            noData: '尚未收集到資料。',
+            exported: '已匯出 {label}，共 {rows} 筆',
+            exportedSkipped: '已匯出 {label}，共 {rows} 筆（略過其他月份 {skipped} 筆）',
+            noForm: '此頁面找不到日期欄位',
+            startSet: '開始日期已改為 {date}',
+            progress: '{pages} 頁 / {rows} 筆',
+            expense: '消費',
+            refund: '退款',
+            net: '淨消費',
+            payment: '還款（不計入）：',
+            delay: '每頁間隔：',
+            seconds: '秒',
+            latestMonth: '只要最近一個月',
+            start: '自動收集',
+            stop: '停止',
+            csv: '匯出 CSV',
+            clear: '清空',
+            first: '由 1 號查',
+            firstTip: '把開始日期改為本月 1 號並重新查詢',
+        },
+    };
+
+    // zh-HK / zh-TW / zh-MO / zh-Hant → Traditional; other zh → Simplified.
+    function pickLang(language) {
+        const l = String(language || '').toLowerCase();
+        if (!l.startsWith('zh')) return 'en';
+        return /hant|hk|tw|mo/.test(l) ? 'zhHant' : 'zhHans';
+    }
+
+    function format(template, vars = {}) {
+        return template.replace(/\{(\w+)\}/g, (_, k) => vars[k]);
+    }
+
     if (typeof window === 'undefined') {
-        module.exports = { parseDateText, parseAmount, parseRow, normalizeSigns, summarize, safeCell, toCSVLine, buildCSV };
+        module.exports = { parseDateText, parseAmount, parseRow, normalizeSigns, summarize, safeCell, toCSVLine, buildCSV, TEXT, pickLang, format };
         return;
     }
 
@@ -145,13 +261,16 @@
 
     if (window !== window.top) return;
 
+    const LANG = pickLang(navigator.language);
+    const t = (key, vars) => format(TEXT[LANG][key], vars);
+
     const STATE = {
         collected: [],
         pageKeysSeen: new Set(),
         running: false,
         delayMs: 3000,
         latestMonthOnly: true,
-        lastMessage: 'Waiting...',
+        lastMessage: t('waiting'),
     };
 
     function getFrameDocument() {
@@ -202,21 +321,21 @@
     function collectCurrentPage(pageIndex) {
         const rows = getTransactionRows();
         if (rows.length === 0) {
-            STATE.lastMessage = `Page ${pageIndex + 1}: no transaction rows found`;
+            STATE.lastMessage = t('noRows', { n: pageIndex + 1 });
             updateUI();
             return false;
         }
 
         const pageKey = getPageSignature();
         if (STATE.pageKeysSeen.has(pageKey)) {
-            STATE.lastMessage = `Page ${pageIndex + 1}: already collected`;
+            STATE.lastMessage = t('already', { n: pageIndex + 1 });
             updateUI();
             return false;
         }
 
         STATE.pageKeysSeen.add(pageKey);
         STATE.collected.push(...rows);
-        STATE.lastMessage = `Collected page ${pageIndex + 1}: ${rows.length} rows`;
+        STATE.lastMessage = t('collected', { n: pageIndex + 1, rows: rows.length });
         updateUI();
         return true;
     }
@@ -420,7 +539,7 @@
     function resetCollection() {
         STATE.collected = [];
         STATE.pageKeysSeen = new Set();
-        STATE.lastMessage = 'Collection reset';
+        STATE.lastMessage = t('reset');
         updateUI();
     }
 
@@ -434,7 +553,7 @@
         if (STATE.running) return;
 
         STATE.running = true;
-        STATE.lastMessage = 'Starting collection...';
+        STATE.lastMessage = t('starting');
         updateUI();
 
         await waitForTransactions(Math.max(STATE.delayMs, 5000));
@@ -452,11 +571,11 @@
             // Last-page check: current page is the highest number in the bar.
             const pag = getPaginationState();
             if (pag && pag.active !== null && pag.active >= pag.max) {
-                finishLoop('Finished: reached the last page');
+                finishLoop(t('lastPage'));
                 break;
             }
 
-            STATE.lastMessage = `Opening page ${nextPageIndex + 1}...`;
+            STATE.lastMessage = t('opening', { n: nextPageIndex + 1 });
             updateUI();
 
             const clicked = goToPage(nextPageIndex);
@@ -474,14 +593,14 @@
             if (!clicked || !changed) {
                 // Semi-auto fallback: let the user click the page number by
                 // hand while we watch for the table to change.
-                STATE.lastMessage = `Auto-click failed — please click page ${nextPageIndex + 1} MANUALLY. Watching for the change (or press Stop to finish)...`;
+                STATE.lastMessage = t('manual', { n: nextPageIndex + 1 });
                 updateUI();
                 console.log('[BEA] Waiting for manual page change. clicked =', clicked);
 
                 changed = await waitForPageChange(previousSignature, 300000);
 
                 if (!changed) {
-                    if (STATE.running) finishLoop('Finished: no further page change detected');
+                    if (STATE.running) finishLoop(t('noChange'));
                     break;
                 }
             }
@@ -493,7 +612,7 @@
 
     function stopAuto() {
         STATE.running = false;
-        STATE.lastMessage = 'Stopped';
+        STATE.lastMessage = t('stopped');
         updateUI();
     }
 
@@ -519,7 +638,7 @@
     function exportCSV() {
         const { rows, label, skipped } = selectRows();
         if (rows.length === 0) {
-            alert('No data collected yet.');
+            alert(t('noData'));
             return;
         }
 
@@ -532,9 +651,7 @@
         link.click();
         URL.revokeObjectURL(url);
 
-        STATE.lastMessage = skipped > 0
-            ? `Exported ${rows.length} rows for ${label} (skipped ${skipped} rows from other months)`
-            : `Exported ${rows.length} rows for ${label}`;
+        STATE.lastMessage = t(skipped > 0 ? 'exportedSkipped' : 'exported', { rows: rows.length, label, skipped });
         updateUI(true);
     }
 
@@ -545,7 +662,7 @@
         const showBtn = doc.getElementById('showBtn');
         const parts = startInput ? normalizeText(startInput.value).split('/') : [];
         if (!showBtn || parts.length !== 3) {
-            STATE.lastMessage = 'Date form not found on this page';
+            STATE.lastMessage = t('noForm');
             updateUI();
             return;
         }
@@ -555,7 +672,7 @@
         startInput.dispatchEvent(new EventCtor('input', { bubbles: true }));
         startInput.dispatchEvent(new EventCtor('change', { bubbles: true }));
         showBtn.click();
-        STATE.lastMessage = `Start date set to ${startInput.value}`;
+        STATE.lastMessage = t('startSet', { date: startInput.value });
         updateUI();
     }
 
@@ -581,20 +698,18 @@
         const pages = STATE.pageKeysSeen.size;
         const running = STATE.running;
 
-        status.innerHTML = done
-            ? `<span style="color:#2ecc71">${escapeHTML(STATE.lastMessage)} (${pages} pages / ${rows} rows)</span>`
-            : running
-                ? `<span style="color:#f39c12">${escapeHTML(STATE.lastMessage)} (${pages} pages / ${rows} rows)</span>`
-                : `${escapeHTML(STATE.lastMessage)}<br><b style="color:white">${rows}</b> rows from ${pages} pages`;
+        const color = done ? '#2ecc71' : running ? '#f39c12' : '#aaa';
+        status.innerHTML = `<span style="color:${color}">${escapeHTML(STATE.lastMessage)}</span><br>`
+            + `<b style="color:white">${escapeHTML(t('progress', { pages, rows }))}</b>`;
 
         const sel = selectRows();
         const s = summarize(sel.rows);
         const fmt = (n) => n.toLocaleString('en-HK', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
         summary.innerHTML = sel.rows.length === 0 ? '' : `
             <div style="color:#aaa;margin-bottom:2px;">${escapeHTML(sel.label)}</div>
-            Expense <b>${fmt(s.expense)}</b> − Refund <b>${fmt(s.refund)}</b>
-            = Net <b style="color:#2ecc71">${fmt(s.net)}</b><br>
-            <span style="color:#aaa">Payments (excluded): ${fmt(s.payment)}</span>`;
+            ${t('expense')} <b>${fmt(s.expense)}</b> − ${t('refund')} <b>${fmt(s.refund)}</b>
+            = ${t('net')} <b style="color:#2ecc71">${fmt(s.net)}</b><br>
+            <span style="color:#aaa">${t('payment')}${fmt(s.payment)}</span>`;
 
         setButtonState(startBtn, !running, '#c0392b', '#555');
         setButtonState(stopBtn, running, '#888', '#555');
@@ -634,37 +749,37 @@
 
         panel.innerHTML = `
             <div style="font-weight:bold;font-size:13px;margin-bottom:8px;color:#e74c3c;">
-                BEA statement exporter v9
+                ${t('title')}
             </div>
             <div id="_beaStatus" style="margin-bottom:8px;color:#aaa;min-height:32px;">
-                Waiting...
+                ${t('waiting')}
             </div>
             <div id="_beaSummary" style="margin-bottom:8px;line-height:1.5;"></div>
             <label style="display:block;margin-bottom:6px;font-size:11px;">
-                Page delay:
+                ${t('delay')}
                 <input id="_beaDelayInput" type="number" value="3" min="2" max="20"
                     style="width:42px;background:#333;color:white;border:1px solid #555;border-radius:3px;padding:2px 4px;">
-                seconds
+                ${t('seconds')}
             </label>
             <label style="display:block;margin-bottom:10px;font-size:11px;">
-                <input id="_beaMonthInput" type="checkbox" checked> Latest month only
+                <input id="_beaMonthInput" type="checkbox" checked> ${t('latestMonth')}
             </label>
             <div style="display:flex;gap:6px;flex-wrap:wrap;">
                 <button id="_beaStartBtn" style="border:none;border-radius:5px;padding:7px 10px;font-size:12px;font-weight:bold;">
-                    Auto collect
+                    ${t('start')}
                 </button>
                 <button id="_beaStopBtn" style="border:none;border-radius:5px;padding:7px 10px;font-size:12px;">
-                    Stop
+                    ${t('stop')}
                 </button>
                 <button id="_beaExportBtn" style="border:none;border-radius:5px;padding:7px 10px;font-size:12px;">
-                    CSV
+                    ${t('csv')}
                 </button>
                 <button id="_beaResetBtn" style="border:none;border-radius:5px;padding:7px 10px;font-size:12px;">
-                    Reset
+                    ${t('clear')}
                 </button>
-                <button id="_beaFirstBtn" title="Set start date to the 1st of the month and search again"
+                <button id="_beaFirstBtn" title="${t('firstTip')}"
                     style="border:none;border-radius:5px;padding:7px 10px;font-size:12px;background:#34495e;color:white;cursor:pointer;">
-                    From 1st
+                    ${t('first')}
                 </button>
             </div>
         `;

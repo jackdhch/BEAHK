@@ -21,6 +21,8 @@ New versions are picked up automatically.
 
 Other controls: **Stop**, **Reset** (start over), **Page delay** (seconds between pages; raise it if the site is slow), and **Latest month only** (on by default: keep only the most recent calendar month).
 
+The panel follows your browser language: English, Simplified Chinese or Traditional Chinese.
+
 ## Output
 
 | Posting Date | Transaction Date | Description | Amount | Type |
@@ -31,6 +33,7 @@ Other controls: **Stop**, **Reset** (start over), **Page delay** (seconds betwee
 
 - **Spending is positive; refunds and repayments are negative**, whichever sign convention the bank page happens to use. The script detects it.
 - Dates are ISO (`YYYY-MM-DD`), so Excel never swaps day and month.
+- Headers and Type values are always English, so imports and the formulas below work in any language.
 - Totals in Excel: `=SUMIF(E:E,"expense",D:D)` for spending, `=-SUMIF(E:E,"refund",D:D)` for refunds, or a pivot table on the Type column.
 
 ## Privacy
@@ -44,6 +47,7 @@ Delete the old script in Tampermonkey, then install again using the link above. 
 - No formulas at the top of the CSV, just data, so it imports cleanly into budgeting apps. Totals are shown on the panel instead.
 - New Transaction Date and Type columns; dates are `YYYY-MM-DD`.
 - Purchases whose merchant name contains "PAYMENT" are no longer mistaken for repayments.
+- The panel speaks Chinese as well as English, following the browser language.
 - The page no longer changes the date and searches on load. Press **From 1st** instead.
 
 ## When it breaks

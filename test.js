@@ -42,4 +42,19 @@ assert.strictEqual(
     "Posting Date,Transaction Date,Description,Amount,Type\n2026-05-01,,'@evil,-20.00,refund",
 );
 
+// Panel text: every language has every key and the same placeholders.
+const keys = Object.keys(c.TEXT.en).sort();
+const holes = (str) => (str.match(/\{\w+\}/g) || []).sort().join();
+for (const lang of ['zhHans', 'zhHant']) {
+    assert.deepStrictEqual(Object.keys(c.TEXT[lang]).sort(), keys, lang);
+    keys.forEach((k) => assert.strictEqual(holes(c.TEXT[lang][k]), holes(c.TEXT.en[k]), `${lang}.${k}`));
+}
+assert.strictEqual(c.pickLang('zh-CN'), 'zhHans');
+assert.strictEqual(c.pickLang('zh'), 'zhHans');
+assert.strictEqual(c.pickLang('zh-HK'), 'zhHant');
+assert.strictEqual(c.pickLang('zh-Hant-TW'), 'zhHant');
+assert.strictEqual(c.pickLang('en-GB'), 'en');
+assert.strictEqual(c.pickLang(undefined), 'en');
+assert.strictEqual(c.format(c.TEXT.zhHans.collected, { n: 2, rows: 20 }), '已收集第 2 页：20 条');
+
 console.log('all tests passed');
